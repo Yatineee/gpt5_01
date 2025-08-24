@@ -1,7 +1,6 @@
 import os
 import re
 import json
-import time
 import requests
 import datetime as dt
 import streamlit as st
@@ -10,23 +9,20 @@ from openai import OpenAI
 # ------------------------------
 # Config & Clients
 # ------------------------------
-from openai import OpenAI
-import os
-
-from openai import OpenAI
-import os
+# # ==== 放在顶部某处（全局变量/工具）====
+# DEBUG_MODE = st.sidebar.checkbox("Debug 模式（显示原始返回）", value=False)
 
 client = OpenAI(
     base_url="https://api.aimlapi.com/v1",
     api_key=os.environ.get("AIML_API_KEY"),
 )
 
-MODEL = os.environ.get("AIML_MODEL", "gpt-5-2025-08-07")  # 或 gpt-5
+MODEL = os.environ.get("AIML_MODEL", "gpt-5-2025-08-07")  # or gpt-5
 
 
-st.set_page_config(page_title="AI Tutor — Learn & Review", layout="wide")
+st.set_page_config(page_title="LearnX5 Tutor — Learn & Review", layout="wide")
 
-# 简单持久化（Space 重启会丢失，可扩展为 HF Datasets 或外部DB）
+# simplify（The Space restart will result in data loss. It can be expanded to HF Datasets or an external database.）
 DATA_DIR = "./data"
 REV_PATH = f"{DATA_DIR}/reviews.json"
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -54,10 +50,10 @@ def fetch_github_readme(owner_repo: str):
     return ""
 
 def split_markdown_units(md: str, max_units: int = 12):
-    """粗略按二/三级标题切分为学习单元。"""
+    """Roughly split into learning units by secondary/tertiary headings."""
     if not md:
         return [{"title": "README", "content": "(README not found)"}]
-    # 找到所有 ## 或 ### 段落
+    # Find all ## or ### paragraphs
     blocks = re.split(r"\n(?=##\s)|\n(?=###\s)", md)
     units = []
     for i, b in enumerate(blocks):
@@ -66,7 +62,7 @@ def split_markdown_units(md: str, max_units: int = 12):
         units.append({"title": title, "content": b.strip()})
         if len(units) >= max_units:
             break
-    # 若过少，补一个总览
+    # If too few, add an overview
     if len(units) < 2:
         units = [{"title": "Overview", "content": md}]
     return units
@@ -161,24 +157,22 @@ def split_markdown_units(md: str, max_units: int = 12):
 #         return rsp.choices[0].message.content
 
 
-# ---- 放在文件顶部附近（导入后）----
-import json, re
-import streamlit as st
+
 
 def _extract_text_from_responses_obj(rsp):
     """
-    兼容不同 Responses 实现：
+    Compatible with different Responses implementations：
     - rsp.output_text
     - rsp.output[*].content[*].text
-    - rsp.choices[*].message.content（有些兼容层直接返回 chat 结构）
-    - dict/json 场景
+    - rsp.choices[*].message.content（Some compatibility layers directly return the chat structure）
+    - dict/json (scenarios)
     """
-    # 1) SDK 对象可能有 output_text
+    # 1) SDK Object might output_text
     text = getattr(rsp, "output_text", None)
     if text:
         return text
 
-    # 2) SDK 对象可能能转成 dict
+    # 2) SDK Object might be convertible to dict
     try:
         d = rsp if isinstance(rsp, dict) else rsp.model_dump()
     except Exception:
@@ -188,13 +182,13 @@ def _extract_text_from_responses_obj(rsp):
             d = None
 
     if isinstance(d, dict):
-        # 2a) 标准 Responses 树
+        # 2a) Standard Responses Tree
         out = d.get("output") or d.get("response") or {}
-        # 典型形状：{"output":[{"content":[{"type":"output_text","text":"..."}]}]}
+        # Classical shape：{"output":[{"content":[{"type":"output_text","text":"..."}]}]}
         if isinstance(out, list) and out:
             content = out[0].get("content") if isinstance(out[0], dict) else None
             if isinstance(content, list):
-                # 找 text
+                # Found text
                 for c in content:
                     if isinstance(c, dict):
                         if "text" in c and c["text"]:
@@ -202,23 +196,23 @@ def _extract_text_from_responses_obj(rsp):
                         if c.get("type") in ("output_text","text") and c.get("text"):
                             return c["text"]
 
-        # 2b) 有些兼容层直接返回 chat 结构
+        # 2b) Some compatibility layers return chat structure directly
         choices = d.get("choices")
         if isinstance(choices, list) and choices:
             msg = choices[0].get("message", {})
             if isinstance(msg, dict) and msg.get("content"):
                 return msg["content"]
 
-        # 2c) 还有些把正文塞在 top-level 的 text / message 里
+        # 2c) Some layers put the main text in the top-level text/message
         for key in ("text","message","content"):
             if isinstance(d.get(key), str) and d[key].strip():
                 return d[key]
 
-    # 3) 都没有就空字符串
+    # 3) If all else fails, return an empty string
     return ""
 
 def _coerce_json(text: str):
-    """把模型输出尽量解析为 JSON；否则包在 {"raw": "..."}"""
+    """Try to parse the model output as JSON; otherwise, enclose it in {"raw": "..." }"""
     if not text or not str(text).strip():
         return {"raw": ""}
     try:
@@ -230,54 +224,101 @@ def _coerce_json(text: str):
             except: pass
         return {"raw": str(text).strip()}
 
-# ---- 覆盖你的两个调用函数 ----
+def _as_dict(obj):
+    """Try to turn SDK response into dict safely"""
+    if isinstance(obj, dict):
+        return obj
+    for attr in ("model_dump", "to_dict", "dict"):
+        if hasattr(obj, attr):
+            try:
+                return getattr(obj, attr)()
+            except Exception:
+                pass
+    try:
+        return json.loads(str(obj))
+    except Exception:
+        return None
+    
+# def call_gpt_json(user_prompt: str, system_prompt: str = ""):
+#     """
+#     Priority Responses; If unavailable, automatically downgrade to Chat.
+#     No longer heavily rely on response_format; use prompt + fallback parsing to ensure JSON format.
+#     """
+#     sys = (system_prompt or "You are a helpful coach.") + \
+#           " Output MUST be a single valid JSON object. No prose, no code fences."
+
+#     # 1) try responses
+#     try:
+#         rsp = client.responses.create(
+#             model=MODEL,
+#             input=[
+#                 {"role": "system", "content": sys},
+#                 {"role": "user", "content": user_prompt},
+#             ],
+#             # temperature=0.2,
+#         )
+#         raw_dict = _as_dict(rsp) or str(rsp)
+#         st.write("🧾 Raw response (dict) →", raw_dict)   # 页面查看
+#         print("RAW:", json.dumps(raw_dict, ensure_ascii=False) if isinstance(raw_dict, dict) else raw_dict)
+
+#         text = _extract_text_from_responses_obj(rsp)
+#         # Debug：Display/print the parsed original text
+#         st.write("🔎 Debug -Mentioned text:", text)
+#         print("DEBUG text:", repr(text))  # For command line visibility
+#         data = _coerce_json(text)
+#         # Debug：View the JSON structure
+#         st.write("🔎 Debug - JSON 数据:", data)
+#         print("DEBUG data:", data)
+#         # For easy debugging: Store the original response in the session.
+#         st.session_state._last_api_json = getattr(rsp, "model_dump", lambda: str(rsp))()
+#         return data
+#     except TypeError:
+#         # Some implementations do not support responses, fallback to chat
+#         pass
+#     except Exception as e:
+#         # Other exceptions try chat
+#         st.info(f"Responses call exception, switching to chat: {e}")
+
+#     # 2) chat.completions
+#     rsp = client.chat.completions.create(
+#         model=MODEL,
+#         messages=[
+#             {"role": "system", "content": sys},
+#             {"role": "user", "content": user_prompt},
+#         ],
+#         temperature=0.2,
+#     )
+#     text = rsp.choices[0].message.content if rsp.choices else ""
+#     st.session_state._last_api_json = rsp.model_dump() if hasattr(rsp, "model_dump") else rsp
+#     return _coerce_json(text)
+
 def call_gpt_json(user_prompt: str, system_prompt: str = ""):
-    """
-    优先 Responses；若不可用自动降级到 Chat。
-    不再强依赖 response_format，以提示词+兜底解析确保 JSON。
-    """
     sys = (system_prompt or "You are a helpful coach.") + \
           " Output MUST be a single valid JSON object. No prose, no code fences."
 
-    # 1) 尝试 responses
     try:
-        rsp = client.responses.create(
+        rsp = client.chat.completions.create(
             model=MODEL,
-            input=[
+            messages=[
                 {"role": "system", "content": sys},
                 {"role": "user", "content": user_prompt},
             ],
-            # temperature=0.2,
+            temperature=0.2,
         )
-        text = _extract_text_from_responses_obj(rsp)
-        data = _coerce_json(text)
-        # 方便调试：把原始响应放入 session
-        st.session_state._last_api_json = getattr(rsp, "model_dump", lambda: str(rsp))()
-        return data
-    except TypeError:
-        # 某些实现不支持 responses，走 chat
-        pass
-    except Exception as e:
-        # 其他异常再试 chat
-        st.info(f"Responses 调用异常，切换 chat: {e}")
+        raw = rsp.model_dump() if hasattr(rsp, "model_dump") else rsp
+        st.session_state._last_api_json = raw
 
-    # 2) chat.completions
-    rsp = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": sys},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-    )
-    text = rsp.choices[0].message.content if rsp.choices else ""
-    st.session_state._last_api_json = rsp.model_dump() if hasattr(rsp, "model_dump") else rsp
-    return _coerce_json(text)
+        text = rsp.choices[0].message.content if rsp.choices else ""
+        return _coerce_json(text)
+    except Exception as e:
+        st.error(f"生成失败: {e}")
+        return {"raw": ""}
+
 
 def call_gpt_text(messages):
     """
-    文本问答：优先 responses；失败降级 chat。
-    messages 形如 [{"role": "...", "content": "..."}]
+    Text answer: Priority responses; failed chat downgrade.
+    messages like [{"role": "...", "content": "..."}]
     """
     try:
         rsp = client.responses.create(model=MODEL, input=messages, temperature=0.3)
@@ -286,7 +327,8 @@ def call_gpt_text(messages):
     except TypeError:
         pass
     except Exception as e:
-        st.info(f"Responses 调用异常，切换 chat: {e}")
+        pass
+        # st.info(f"Responses call exception, switching to chat: {e}")
 
     rsp = client.chat.completions.create(model=MODEL, messages=messages, temperature=0.3)
     st.session_state._last_api_json = rsp.model_dump() if hasattr(rsp, "model_dump") else rsp
@@ -346,7 +388,7 @@ if st.sidebar.button("🧠 generate the plan", use_container_width=True):
         f"Persona: {', '.join(persona) or '(none)'}\n"
         f"Interests: {', '.join(interests) or '(none)'}\n"
         f"Goals: {', '.join(goals) or '(none)'}\n"
-        f"Time: {time_mode} ~ {hours} 小时\n"
+        f"Time: {time_mode} ~ {hours} hours\n"
     )
     sys = "You are a senior curriculum designer. Recommend high-quality, actively maintained GitHub repos (1-3) that match the user's profile (prefer star>1k, clear README). Then design a 30-day plan."
     prompt = (
@@ -355,12 +397,12 @@ if st.sidebar.button("🧠 generate the plan", use_container_width=True):
         "Profile:\n" + user +
         "Constraints:\n- repos <= 3, concise reasons.\n- Use free resources only.\n- Plan considers the user's time budget."
     )
-    with st.spinner("向 GPT‑5 生成建议中…"):
+    with st.spinner("In the suggestions generated for GPT-5..."):
         out = call_gpt_json(prompt, sys)
     st.session_state.reco = out
 
-    if st.checkbox("显示原始返回（debug）"):
-        st.write(st.session_state.get("_last_api_json"))
+    # if st.checkbox("Display original return (debug)"):
+    #     st.write(st.session_state.get("_last_api_json"))
 
 
 # ------------------------------
@@ -375,16 +417,62 @@ tab1, tab2 = st.tabs(["Study Module", "Review Module"])
 # ------------------------------
 with tab1:
     st.subheader("Recommended Repositories and Learning Units")
-    colA, colB = st.columns([1, 1])
-    with colA:
-        if st.session_state.get("reco"):
-            st.json(st.session_state.reco)
-        else:
-            st.info("Fill out the questionnaire on the left and click 'Generate' to get repository recommendations and a 30-day plan.")
+    # colA, colB = st.columns([1, 1])
+    # with colA:
+    if st.session_state.get("reco"):
+        # st.json(st.session_state.reco)
+        # ------------------------------ 取代原来的 st.json(...) 展示 ------------------------------
+        plan = st.session_state.get("reco")
+        if plan and isinstance(plan, dict) and plan.get("repos"):
+            st.subheader("📚 Recommended Repositories")
 
-    # Select a GitHub repository
-    st.markdown("---")
-    repo_input = st.text_input("Select or paste a GitHub repository (owner/repo or full URL)", placeholder="e.g. TheAlgorithms/Python")
+            def normalize_repo_url(s: str):
+                if not s:
+                    return ""
+                m = re.search(r"github\.com/([\w.-]+/[\w.-]+)", s)
+                return m.group(1) if m else s.strip()
+
+            for i, repo in enumerate(plan["repos"]):
+                name = repo.get("name", f"repo-{i}")
+                url  = repo.get("url", "")
+                why  = repo.get("why", "")
+
+                with st.container(border=True):
+                    top_l, top_r = st.columns([6, 1])
+                    with top_l:
+                        st.markdown(f"### {name}")
+                        st.write(why)
+                        st.caption(url)
+
+                    with top_r:
+                        # View 按钮：首选 link_button，不支持就退化成超链接
+                        try:
+                            st.link_button("View ↗", url, key=f"view_{i}", use_container_width=True)
+                        except Exception:
+                            st.markdown(f"[View ↗]({url})")
+
+                        # Choose 按钮：选择该仓库并准备学习单元
+                        if st.button("Choose ✅", key=f"choose_{i}", use_container_width=True):
+                            owner_repo = normalize_repo_url(url) or name
+                            with st.spinner("Fetching README & splitting units…"):
+                                md = fetch_github_readme(owner_repo)
+                                st.session_state.repo = {"name": owner_repo, "readme": md}
+                                st.session_state.units = split_markdown_units(md)
+                            st.success(f"Selected **{owner_repo}** · Split into {len(st.session_state.units)} units")
+                            # 可选：自动把输入框填上，方便用户看到已选仓库
+                            st.session_state["last_chosen_repo"] = owner_repo
+                            # 也可以在这里触发默认选中第一个单元：
+                            # st.session_state["default_unit_index"] = 0
+                            # 页面会继续使用下方的单位选择器
+
+                # st.markdown("—")
+        else:
+            st.info("Fill out the questionnaire on the left and click **Generate** to get repository cards.")
+
+
+    # # Select a GitHub repository
+    # st.markdown("---")
+    # repo_input = st.text_input("Select or paste a GitHub repository (owner/repo or full URL)", placeholder="e.g. TheAlgorithms/Python")
 
     def normalize_repo(s: str):
         if not s:
@@ -392,13 +480,13 @@ with tab1:
         m = re.search(r"github\.com/([\w.-]+/[\w.-]+)", s)
         return m.group(1) if m else s.strip()
 
-    if st.button("📥 get README and split units", disabled=not repo_input):
-        owner_repo = normalize_repo(repo_input)
-        with st.spinner("Fetching README.md…"):
-            md = fetch_github_readme(owner_repo)
-        st.session_state.repo = {"name": owner_repo, "readme": md}
-        st.session_state.units = split_markdown_units(md)
-        st.success(f"Split into {len(st.session_state.units)} study units")
+    # if st.button("📥 get README and split units", disabled=not repo_input):
+    #     owner_repo = normalize_repo(repo_input)
+    #     with st.spinner("Fetching README.md…"):
+    #         md = fetch_github_readme(owner_repo)
+    #     st.session_state.repo = {"name": owner_repo, "readme": md}
+    #     st.session_state.units = split_markdown_units(md)
+    #     st.success(f"Split into {len(st.session_state.units)} study units")
 
     if "units" in st.session_state and st.session_state.units:
         unit_titles = [u["title"] for u in st.session_state.units]
@@ -406,17 +494,26 @@ with tab1:
         unit = st.session_state.units[idx]
 
         left, right = st.columns([1.4, 1])
+        # with left:
+        #     st.markdown(f"### 📖 {unit['title']}")
+        #     st.markdown(st.session_state.repo.get("readme")[:2000] if len(unit['content']) < 200 else unit['content'])
+        #     st.caption("The left side displays the warehouse knowledge of this unit (split by the sections of the README).")
         with left:
             st.markdown(f"### 📖 {unit['title']}")
-            st.markdown(st.session_state.repo.get("readme")[:2000] if len(unit['content']) < 200 else unit['content'])
+            # ✅ 渲染 HTML，让 <img> / <picture> 生效
+            st.markdown(
+                st.session_state.repo.get("readme")[:2000] if len(unit["content"]) < 200 else unit["content"],
+                unsafe_allow_html=True
+            )
             st.caption("The left side displays the warehouse knowledge of this unit (split by the sections of the README).")
+
 
         with right:
             st.markdown("### 🤖 GPT‑5 Q&A")
             if "chat" not in st.session_state:
                 st.session_state.chat = []  # [{q,a}]
 
-            # 简易对话输入
+            # Simple chat input
             q = st.text_area("Your Question", height=120, placeholder="Please provide explanations/examples/practice suggestions based on the content on the left...")
             if st.button("Send Question", disabled=not q):
                 # Constructing System Prompt: Use the information on the left as the known context + Request for LeetCode/Knowledge Base suggestions
@@ -430,14 +527,14 @@ with tab1:
                     {"role": "system", "content": system},
                     {"role": "user", "content": f"Repo context (excerpt):\n\n{repo_ctx}\n\nQuestion: {q}"},
                 ]
-                with st.spinner("GPT‑5 思考中…"):
+                with st.spinner("GPT‑5 Thinking…"):
                     a = call_gpt_text(messages)
                 st.session_state.chat.append({"q": q, "a": a, "unit": unit["title"]})
 
             # Displaying conversation
             for i, turn in enumerate(reversed(st.session_state.chat[-8:])):
                 st.markdown(f"**You:** {turn['q']}")
-                st.markdown(f"**GPT‑5:** {turn['a']}")
+                st.markdown(f"**LearnX5:** {turn['a']}")
                 st.markdown("---")
 
             # Completing study: Generate summary → Save to review module
