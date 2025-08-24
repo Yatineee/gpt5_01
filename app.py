@@ -408,7 +408,7 @@ if st.sidebar.button("🧠 generate the plan", use_container_width=True):
 # ------------------------------
 # Main Tabs
 # ------------------------------
-st.title("📚 AI Tutor — Study / Review")
+st.title("📚 LearnX5 Tutor — Study / Review")
 
 tab1, tab2 = st.tabs(["Study Module", "Review Module"])
 
@@ -586,3 +586,4 @@ with tab2:
                 if r.get("followUps"):
                     st.markdown("**Follow-up Suggestions**:")
                     st.write("\n".join([f"• {x}" for x in r["followUps"]]))
+
