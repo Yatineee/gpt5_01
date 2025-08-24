@@ -1,3 +1,4 @@
+from __future__ import annotations
 import os
 import re
 import json
@@ -5,6 +6,9 @@ import requests
 import datetime as dt
 import streamlit as st
 from openai import OpenAI
+import json, os, tempfile
+from pathlib import Path
+from typing import Any, List
 
 # ------------------------------
 # Config & Clients
@@ -12,12 +16,70 @@ from openai import OpenAI
 # # ==== 放在顶部某处（全局变量/工具）====
 # DEBUG_MODE = st.sidebar.checkbox("Debug 模式（显示原始返回）", value=False)
 
+
+def get_reviews_path() -> Path:
+    data_dir = Path("/data") if Path("/data").exists() else Path.cwd()
+    p = data_dir / "reviews.json"
+    if not p.exists():
+        p.write_text("[]", encoding="utf-8")
+    return p
+
+REVIEWS_PATH = get_reviews_path()
+
 client = OpenAI(
     base_url="https://api.aimlapi.com/v1",
     api_key=os.environ.get("AIML_API_KEY"),
 )
 
 MODEL = os.environ.get("AIML_MODEL", "gpt-5-2025-08-07")  # or gpt-5
+
+
+
+def _atomic_write_text(path: Path, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=str(path.parent), delete=False, encoding="utf-8") as tf:
+        tf.write(text)
+        tmp = tf.name
+    os.replace(tmp, path)  # 原子替换
+
+# 首次初始化一个“版本号”，用于兜底的强制刷新
+if "reviews_version" not in st.session_state:
+    st.session_state.reviews_version = 0
+
+def _current_mtime() -> float:
+    try:
+        return REVIEWS_PATH.stat().st_mtime
+    except FileNotFoundError:
+        return 0.0
+
+@st.cache_data(show_spinner=False)
+def _load_reviews_cached(_mtime: float, _version: int) -> list[dict]:
+    """注意：只有当文件 mtime 或版本号变化时才会失效。"""
+    try:
+        txt = REVIEWS_PATH.read_text(encoding="utf-8")
+        data = json.loads(txt)
+        return data if isinstance(data, list) else []
+    except Exception as e:
+        # 读取失败时返回空，不让界面崩
+        return []
+
+def load_reviews() -> list[dict]:
+    # 以 mtime + version 作为 cache key，确保写入后必刷新
+    return _load_reviews_cached(_current_mtime(), st.session_state.reviews_version)
+
+def save_review(item: dict):
+    try:
+        cur = load_reviews()
+        cur.append(item)
+        _atomic_write_text(REVIEWS_PATH, json.dumps(cur, ensure_ascii=False, indent=2))
+    except Exception as e:
+        st.error(f"Save review failed: {e}")
+        return
+    # 触发缓存失效 + 立即刷新页面
+    st.session_state.reviews_version += 1
+    st.session_state["just_saved"] = True
+    st.rerun()   # Streamlit 1.31+ 推荐写法
+
 
 
 st.set_page_config(page_title="LearnX5 Tutor — Learn & Review", layout="wide")
@@ -311,7 +373,7 @@ def call_gpt_json(user_prompt: str, system_prompt: str = ""):
         text = rsp.choices[0].message.content if rsp.choices else ""
         return _coerce_json(text)
     except Exception as e:
-        st.error(f"生成失败: {e}")
+        st.error(f"API key is limited, please try again later (10 requests for one hour)")
         return {"raw": ""}
 
 
@@ -474,6 +536,8 @@ with tab1:
     # st.markdown("---")
     # repo_input = st.text_input("Select or paste a GitHub repository (owner/repo or full URL)", placeholder="e.g. TheAlgorithms/Python")
 
+
+
     def normalize_repo(s: str):
         if not s:
             return ""
@@ -563,21 +627,52 @@ with tab1:
                     "keyPoints": j.get("keyPoints", []),
                     "followUps": j.get("followUps", []),
                 }
-                save_review(item)
+                    # ... 你已有的 j / item 构造逻辑
+                save_review(item)  # 内部会 rerun；提示在 tab2 用 just_saved 显示
+            # save_review(item)
                 st.success("Saved to review module ✅")
+
+
 
 # ------------------------------
 # Review Module
 # ------------------------------
+# with tab2:
+#     st.subheader("🗂️ Study Summary Archive")
+#     reviews = load_reviews()
+#     if not reviews:
+#         st.info("No summaries available yet. Please save one after completing a study unit.")
+#     else:
+#         for r in reviews:
+#             with st.container(border=True):
+#                 st.markdown(f"**Time**: {r['ts']}  |  **Repository**: {r.get('repo','-')}  |  **Unit**: {r.get('unit','-')}")
+#                 if r.get("summary"):
+#                     st.markdown("**Summary**: " + r["summary"])
+#                 if r.get("keyPoints"):
+#                     st.markdown("**Key Points**:")
+#                     st.write("\n".join([f"• {x}" for x in r["keyPoints"]]))
+#                 if r.get("followUps"):
+#                     st.markdown("**Follow-up Suggestions**:")
+#                     st.write("\n".join([f"• {x}" for x in r["followUps"]]))
 with tab2:
     st.subheader("🗂️ Study Summary Archive")
+    # 成功保存后的提示在这里弹（因为刚 save 立刻 rerun 了）
+    if st.session_state.pop("just_saved", False):
+        st.success("Saved to review module ✅")
+    # 读取（会使用 mtime + version 缓存键，保证可见）
     reviews = load_reviews()
+    # 可视化一个“调试条”，确认路径和数量
+    with st.expander("Debug (storage)", expanded=False):
+        st.write("Reviews file:", str(REVIEWS_PATH.resolve()))
+        st.write("mtime:", _current_mtime())
+        st.write("count:", len(reviews))
+    # 正常渲染
     if not reviews:
         st.info("No summaries available yet. Please save one after completing a study unit.")
     else:
         for r in reviews:
             with st.container(border=True):
-                st.markdown(f"**Time**: {r['ts']}  |  **Repository**: {r.get('repo','-')}  |  **Unit**: {r.get('unit','-')}")
+                st.markdown(f"**Time**: {r.get('ts','-')}  |  **Repository**: {r.get('repo','-')}  |  **Unit**: {r.get('unit','-')}")
                 if r.get("summary"):
                     st.markdown("**Summary**: " + r["summary"])
                 if r.get("keyPoints"):
@@ -586,4 +681,3 @@ with tab2:
                 if r.get("followUps"):
                     st.markdown("**Follow-up Suggestions**:")
                     st.write("\n".join([f"• {x}" for x in r["followUps"]]))
-
